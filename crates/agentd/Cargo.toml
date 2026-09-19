@@ -1,0 +1,11 @@
+[package]
+name = "agentd"
+version = "0.1.0"
+edition = "2021"
+description = "PTY + headless virtual-terminal session core for Squadron Terminal"
+
+[dependencies]
+portable-pty = { workspace = true }
+tattoy-wezterm-term = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
