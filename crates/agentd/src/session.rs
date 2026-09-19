@@ -103,16 +103,28 @@ fn default_session_cwd() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-/// Session-identity env vars Claude Code itself sets (`CLAUDECODE`,
-/// `CLAUDE_CODE_SESSION_ID`, the inter-agent `CLAUDE_CODE_MESSAGING_*`
-/// socket/token, ...). `portable_pty::CommandBuilder` inherits the parent
-/// process's full environment by default, and this app's own process may
-/// itself have been launched from inside a Claude Code session (a dev
-/// terminal, an editor's integrated terminal, ...) — without scrubbing these,
-/// a spawned session (and anything run inside it, including a manually-typed
-/// `claude`) would silently inherit them and attach to *that* session's
-/// identity/messaging channel instead of starting genuinely independent.
-const SESSION_IDENTITY_ENV_VARS: &[&str] = &[
+/// Env vars that would tie a spawned session to whatever launched this app's
+/// own process, rather than letting it start genuinely independent:
+///
+/// - `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, the inter-agent
+///   `CLAUDE_CODE_MESSAGING_*` socket/token, etc. — Claude Code's own
+///   session-identity vars. This app's own process may itself have been
+///   launched from inside a Claude Code session (a dev terminal, an editor's
+///   integrated terminal, ...); without scrubbing these, a spawned session
+///   (and anything run inside it, including a manually-typed `claude`) would
+///   silently attach to *that* session's identity/messaging channel.
+/// - `ANTHROPIC_BASE_URL` — some setups (e.g. a local memory/context proxy
+///   such as Headroom) point this at a local proxy that transparently
+///   rewrites model requests, which is a form of cross-session state that
+///   `claude`'s own `--setting-sources` flag has no visibility into (it only
+///   governs Claude Code's *own* config-file merging, not OS env vars or
+///   network routing). Removing it lets a spawned session talk to the real
+///   Anthropic API directly.
+///
+/// `portable_pty::CommandBuilder` inherits the parent process's full
+/// environment by default, so any of these left unset here would flow
+/// straight through to whatever this app spawns.
+const ISOLATION_ENV_VARS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",
@@ -123,17 +135,34 @@ const SESSION_IDENTITY_ENV_VARS: &[&str] = &[
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
+    "ANTHROPIC_BASE_URL",
 ];
 
-/// A `CommandBuilder` for `program` with every session-identity env var
+/// A `CommandBuilder` for `program` with every isolation-relevant env var
 /// removed, so every session this app spawns — shell or agent — starts as an
 /// independent process regardless of what launched this app itself.
+///
+/// This alone is *not* sufficient for an interactive login shell: a shell's
+/// own startup files (`.zshrc`, `.zprofile`, ...) commonly re-export exactly
+/// these vars (e.g. a locally-installed proxy tool wiring `ANTHROPIC_BASE_URL`
+/// into every new shell), which happens *after* this process's own env is
+/// applied and silently undoes it. Callers that run a login/interactive shell
+/// must also neutralize that — see `unset_isolation_vars_command` and the
+/// injected `unset` in `spawn_shell`.
 fn isolated_command(program: impl AsRef<std::ffi::OsStr>) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
-    for var in SESSION_IDENTITY_ENV_VARS {
+    for var in ISOLATION_ENV_VARS {
         command.env_remove(var);
     }
     command
+}
+
+/// A shell snippet that unsets every isolation-relevant env var — meant to
+/// run *after* a login/interactive shell has already sourced its own startup
+/// files, undoing any re-export those files performed. `unset` on a var that
+/// was never set is a harmless no-op in both bash and zsh.
+fn unset_isolation_vars_command() -> String {
+    format!("unset {}", ISOLATION_ENV_VARS.join(" "))
 }
 
 /// Writes a `--settings`-scoped Claude Code config wiring every hook we care
@@ -200,7 +229,16 @@ impl Session {
     fn spawn_shell(rows: u16, cols: u16, label: String) -> Result<Self, SessionError> {
         let mut command = isolated_command(resolved_shell());
         command.cwd(default_session_cwd());
-        Self::spawn_with_command(rows, cols, SessionKind::Shell, label, command, None, None)
+        let session =
+            Self::spawn_with_command(rows, cols, SessionKind::Shell, label, command, None, None)?;
+        // `isolated_command`'s env_remove only affects this process's direct
+        // exec — an interactive shell's own startup files run afterward and
+        // can re-export the very vars we just removed. Inject the unset as
+        // if it were the first thing typed, so it applies regardless of what
+        // the shell's rc files did (harmless no-op for any var they didn't
+        // touch).
+        let _ = session.write(format!("{}\n", unset_isolation_vars_command()).as_bytes());
+        Ok(session)
     }
 
     fn spawn_agent(
@@ -237,9 +275,18 @@ impl Session {
         // our own hook wiring still applies regardless, since `--settings
         // <file>` is a separate, explicit override, not one of the three
         // scoped sources this flag controls.
+        // The login shell (`-l`) sources its own startup files before
+        // running this `-c` command — which can re-export exactly the vars
+        // `isolated_command` just removed (see its doc comment). Unsetting
+        // them again here, immediately before `exec claude`, is what
+        // actually makes the removal stick.
+        let script = format!(
+            "{}; exec claude --setting-sources project,local --settings \"$1\"",
+            unset_isolation_vars_command()
+        );
         command.args([
             "-lc",
-            "exec claude --setting-sources project,local --settings \"$1\"",
+            &script,
             "--",
             settings_path.to_string_lossy().as_ref(),
         ]);
@@ -685,6 +732,39 @@ mod tests {
         assert!(
             snapshot.iter().any(|line| line.contains("marker=[]")),
             "CLAUDE_CODE_SESSION_ID should be unset in the spawned session, got: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn spawned_shells_do_not_inherit_anthropic_base_url() {
+        // Regression test: some setups (e.g. a local memory/context proxy)
+        // point ANTHROPIC_BASE_URL at a local proxy that transparently
+        // rewrites model requests. A spawned session's actual API traffic
+        // routing must not depend on whatever the launching environment
+        // happened to have configured, so this must be scrubbed even though
+        // it isn't a Claude-Code-specific var.
+        // SAFETY: see spawned_shells_do_not_inherit_claude_session_identity_env_vars.
+        unsafe {
+            std::env::set_var("ANTHROPIC_BASE_URL", "http://127.0.0.1:1/should-not-leak");
+        }
+
+        let manager = SessionManager::new();
+        let id = manager.spawn(24, 80).expect("spawn should succeed");
+        manager
+            .write(id, b"echo \"marker=[$ANTHROPIC_BASE_URL]\"\n")
+            .expect("write should succeed");
+
+        let snapshot =
+            wait_for_snapshot_containing(&manager, id, "marker=[]", Duration::from_secs(3));
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+
+        assert!(
+            snapshot.iter().any(|line| line.contains("marker=[]")),
+            "ANTHROPIC_BASE_URL should be unset in the spawned session, got: {snapshot:?}"
         );
     }
 
