@@ -14,6 +14,17 @@ avatar per session. Switch sessions by clicking, with `Cmd/Alt+1`–`9`,
 every running session out into a live grid at once with `Cmd/Alt+G`, and
 click any tile to pop it back to full focus.
 
+## Download
+
+Prebuilt macOS and Windows installers are published on the
+[Releases page](https://github.com/mithun9421/squadron-terminal/releases/latest). Builds are
+**unsigned** for now:
+
+- **macOS**: right-click the app → **Open** → confirm in the dialog (only needed the first time).
+- **Windows**: click **More info** on the SmartScreen prompt, then **Run anyway**.
+
+See [`RELEASING.md`](./RELEASING.md) for how releases are built and cut.
+
 ## Stack
 
 - **`crates/agentd`** — Rust library, no Tauri dependency: owns PTY sessions via

@@ -1,0 +1,68 @@
+name: 'release'
+
+# Triggered by pushing a tag like `app-v0.1.0`. Builds macOS (both Apple
+# Silicon and Intel) and Windows installers and attaches them to a GitHub
+# Release as a draft — nothing becomes publicly downloadable until that
+# draft is reviewed and published by hand (see RELEASING.md).
+on:
+  push:
+    tags:
+      - 'app-v*'
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest' # Apple Silicon (M1 and above)
+            args: '--target aarch64-apple-darwin'
+          - platform: 'macos-latest' # Intel
+            args: '--target x86_64-apple-darwin'
+          - platform: 'windows-latest'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: app-v__VERSION__
+          releaseName: 'Squadron Terminal v__VERSION__'
+          releaseBody: |
+            Squadron Terminal MVP — a terminal for running and supervising multiple Claude Code
+            agents at once. Multi-session sidebar, Claude Code hook-driven live agent state, animated
+            ASCII avatars, keyboard switching (`Cmd/Alt+1-9`, quick-switcher), and a fan-out grid.
+
+            ### Install
+
+            **macOS** — download the `.dmg` matching your Mac (Apple Silicon `aarch64` or Intel
+            `x86_64`), open it, drag the app to Applications. This build is **unsigned**: the first
+            time you open it, right-click the app → **Open** → confirm in the dialog. (Only needed once.)
+
+            **Windows** — download the `.msi`, run it. This build is **unsigned**: if SmartScreen
+            warns you, click **More info** → **Run anyway**.
+
+            See the [README](https://github.com/mithun9421/squadron-terminal#readme) and the
+            [PRD](https://claude.ai/code/artifact/07e1a0af-b097-41bd-9ce2-0a7c93407a1d) for full docs.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
