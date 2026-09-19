@@ -1,0 +1,123 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0b0e;
+  --bg-panel: #111318;
+  --bg-panel-2: #16181f;
+  --border: #262a35;
+  --text: #e4e6eb;
+  --text-dim: #8b909c;
+  --accent-blue: #4b9cff;
+  --accent-yellow: #f5c542;
+  --accent-orange: #f59e42;
+  --accent-red: #ef4444;
+  --accent-grey: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+::selection {
+  background: var(--accent-blue);
+  color: #05070a;
+}
+
+.aurora-blob {
+  position: absolute;
+  width: 45vw;
+  height: 45vw;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.35;
+  will-change: transform;
+}
+
+.aurora-blob--a {
+  top: -10%;
+  left: -5%;
+  background: radial-gradient(circle, var(--accent-blue), transparent 70%);
+  animation: aurora-drift-a 22s ease-in-out infinite;
+}
+
+.aurora-blob--b {
+  top: 10%;
+  right: -10%;
+  background: radial-gradient(circle, var(--accent-orange), transparent 70%);
+  animation: aurora-drift-b 26s ease-in-out infinite;
+}
+
+.aurora-blob--c {
+  bottom: -20%;
+  left: 25%;
+  background: radial-gradient(circle, var(--accent-red), transparent 70%);
+  animation: aurora-drift-c 30s ease-in-out infinite;
+}
+
+@keyframes aurora-drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(6vw, 8vh) scale(1.15); }
+}
+
+@keyframes aurora-drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-8vw, 6vh) scale(1.1); }
+}
+
+@keyframes aurora-drift-c {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(4vw, -6vh) scale(1.2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora-blob {
+    animation: none;
+  }
+}
+
+.spotlight-card {
+  --spot-x: 50%;
+  --spot-y: 50%;
+  transition: border-color 0.3s ease;
+}
+
+.spotlight-card:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.spotlight-card__glow {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  background: radial-gradient(
+    360px circle at var(--spot-x) var(--spot-y),
+    rgba(75, 156, 255, 0.12),
+    transparent 60%
+  );
+  pointer-events: none;
+}
+
+.spotlight-card:hover .spotlight-card__glow {
+  opacity: 1;
+}
