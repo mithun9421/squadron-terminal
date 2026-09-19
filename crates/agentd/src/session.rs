@@ -265,23 +265,41 @@ impl Session {
         // (even an unlikely quote/space in a user's TMPDIR) can change what
         // gets executed. `--` is the conventional placeholder for `$0`.
         //
-        // `--setting-sources project,local` deliberately excludes the `user`
-        // scope (`~/.claude/settings.json`) — otherwise an agent inherits
-        // whatever the person has configured globally on this machine
-        // (a cross-session memory tool's SessionStart hook, personal
-        // plugins, a global model override, ...), which makes a freshly
-        // spawned agent look like it "already knows" things unrelated to
-        // its own task. This is intentionally about isolation, not security:
-        // our own hook wiring still applies regardless, since `--settings
-        // <file>` is a separate, explicit override, not one of the three
-        // scoped sources this flag controls.
+        // `--setting-sources` deliberately excludes the `user` scope
+        // (`~/.claude/settings.json`) — otherwise an agent inherits whatever
+        // the person has configured globally on this machine (a cross-session
+        // memory tool's SessionStart hook, personal plugins, a global model
+        // override, ...), which makes a freshly spawned agent look like it
+        // "already knows" things unrelated to its own task. This is
+        // intentionally about isolation, not security: our own hook wiring
+        // still applies regardless, since `--settings <file>` is a separate,
+        // explicit override, not one of the three scoped sources this flag
+        // controls.
+        //
+        // Whether `project` scope can stay enabled depends on where this
+        // session actually lands: when the caller gives no directory, it
+        // defaults to $HOME (`default_session_cwd`) — and Claude Code's
+        // "project settings" there resolve to `$HOME/.claude/settings.json`,
+        // which *is* `~/.claude/settings.json`, the exact file `user` scope
+        // was just excluded to avoid. Enabling `project` in that case would
+        // silently readmit everything this flag exists to keep out. Only
+        // keep `project` scope when the caller actually named a real
+        // directory (their own project's own settings are legitimately
+        // meant to apply there).
+        let setting_sources = if cwd.is_some() {
+            "project,local"
+        } else {
+            "local"
+        };
+        let effective_cwd = cwd.unwrap_or_else(default_session_cwd);
+
         // The login shell (`-l`) sources its own startup files before
         // running this `-c` command — which can re-export exactly the vars
         // `isolated_command` just removed (see its doc comment). Unsetting
         // them again here, immediately before `exec claude`, is what
         // actually makes the removal stick.
         let script = format!(
-            "{}; exec claude --setting-sources project,local --settings \"$1\"",
+            "{}; exec claude --setting-sources {setting_sources} --settings \"$1\"",
             unset_isolation_vars_command()
         );
         command.args([
@@ -290,7 +308,7 @@ impl Session {
             "--",
             settings_path.to_string_lossy().as_ref(),
         ]);
-        command.cwd(cwd.unwrap_or_else(default_session_cwd));
+        command.cwd(effective_cwd);
 
         let server_for_cleanup = Arc::clone(hook_server);
         let token_for_cleanup = token.clone();
