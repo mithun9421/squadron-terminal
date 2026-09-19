@@ -8,15 +8,26 @@ import "./Sidebar.css";
 interface SidebarProps {
   sessions: SessionSummary[];
   activeId: number | null;
+  fanOutOpen: boolean;
   onSelect: (id: number) => void;
   onNewShell: () => void;
   onNewAgent: (cwd: string) => void;
   onClose: (id: number) => void;
+  onToggleFanOut: () => void;
 }
 
 const AVATAR_FRAME_INTERVAL_MS = 400;
 
-export function Sidebar({ sessions, activeId, onSelect, onNewShell, onNewAgent, onClose }: SidebarProps) {
+export function Sidebar({
+  sessions,
+  activeId,
+  fanOutOpen,
+  onSelect,
+  onNewShell,
+  onNewAgent,
+  onClose,
+  onToggleFanOut,
+}: SidebarProps) {
   const [cwdDraft, setCwdDraft] = useState("");
   const tick = useAnimationFrame(AVATAR_FRAME_INTERVAL_MS);
 
@@ -25,6 +36,14 @@ export function Sidebar({ sessions, activeId, onSelect, onNewShell, onNewAgent, 
       <div className="sidebar__actions">
         <button type="button" className="sidebar__button" onClick={onNewShell}>
           + Shell
+        </button>
+        <button
+          type="button"
+          className={fanOutOpen ? "sidebar__button sidebar__button--active" : "sidebar__button"}
+          onClick={onToggleFanOut}
+          disabled={sessions.length === 0}
+        >
+          {fanOutOpen ? "⊞ Collapse" : "⊞ Fan Out"}
         </button>
       </div>
       <div className="sidebar__new-agent">

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { Sidebar } from "./sidebar/Sidebar";
 import { QuickSwitcher } from "./sidebar/QuickSwitcher";
-import { TerminalView } from "./terminal/TerminalView";
+import { PaneArea } from "./panes/PaneArea";
 import { useSessionList } from "./sessions/useSessionList";
 
 /** True for a "real" text input the user is typing into (the sidebar's
@@ -31,6 +31,7 @@ function App() {
   const { sessions, spawnShell, spawnAgent, close } = useSessionList();
   const [activeId, setActiveId] = useState<number | null>(null);
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
+  const [fanOutOpen, setFanOutOpen] = useState(false);
   const agentCounterRef = useRef(0);
 
   // Mirrored into refs so the keydown listener below can be registered once
@@ -39,6 +40,7 @@ function App() {
   const sessionsRef = useRef(sessions);
   const activeIdRef = useRef(activeId);
   const quickSwitcherOpenRef = useRef(quickSwitcherOpen);
+  const fanOutOpenRef = useRef(fanOutOpen);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -49,6 +51,9 @@ function App() {
   useEffect(() => {
     quickSwitcherOpenRef.current = quickSwitcherOpen;
   }, [quickSwitcherOpen]);
+  useEffect(() => {
+    fanOutOpenRef.current = fanOutOpen;
+  }, [fanOutOpen]);
 
   useEffect(() => {
     const activeStillExists = sessions.some((session) => session.id === activeId);
@@ -58,14 +63,23 @@ function App() {
     setActiveId(sessions.length > 0 ? sessions[0].id : null);
   }, [sessions, activeId]);
 
+  // Every explicit "go to this session" action funnels through here, so
+  // picking a session (sidebar click, a number shortcut, the quick switcher,
+  // popping a fan-out tile) always means "show it full-size" — regardless of
+  // whether fan-out was open at the time.
+  const focusSession = (id: number) => {
+    setActiveId(id);
+    setFanOutOpen(false);
+  };
+
   // The listener is registered on the *capturing* phase so it runs before
   // xterm.js's own keydown handling on its focused textarea; on a match we
   // call stopPropagation so the keystroke is consumed here, not also sent to
   // the shell.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      // OS key-repeat would otherwise re-fire the toggle on the same held
-      // keypress, flickering the quick switcher open/closed.
+      // OS key-repeat would otherwise re-fire a toggle on the same held
+      // keypress, flickering it open/closed.
       if (event.repeat) {
         return;
       }
@@ -83,10 +97,22 @@ function App() {
         return;
       }
 
-      // Switcher closed: don't steal keystrokes from an ordinary text field
-      // (e.g. the sidebar's "Project directory" input) — only a terminal
-      // pane being focused (or nothing) should let shortcuts through.
+      // Don't steal keystrokes from an ordinary text field (e.g. the
+      // sidebar's "Project directory" input) — only a terminal pane being
+      // focused (or nothing) should let shortcuts through. Checked before
+      // the fan-out Escape handling below, for the same reason: a plain text
+      // field's own Escape behavior must never be overridden.
       if (isPlainTextInput(document.activeElement)) {
+        return;
+      }
+
+      // Fan-out tiles aren't text inputs, so Escape is free to mean "collapse
+      // back to focus view" while fanned out — the same way it already
+      // dismisses the quick switcher above.
+      if (fanOutOpenRef.current && event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setFanOutOpen(false);
         return;
       }
 
@@ -104,12 +130,19 @@ function App() {
         return;
       }
 
+      if (event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        event.stopPropagation();
+        setFanOutOpen((current) => !current);
+        return;
+      }
+
       if (/^[1-9]$/.test(event.key)) {
         const target = sessions[Number(event.key) - 1];
         if (target) {
           event.preventDefault();
           event.stopPropagation();
-          setActiveId(target.id);
+          focusSession(target.id);
         }
         return;
       }
@@ -120,7 +153,7 @@ function App() {
         const currentIndex = sessions.findIndex((session) => session.id === activeId);
         const direction = event.key === "]" ? 1 : -1;
         const nextIndex = (currentIndex + direction + sessions.length) % sessions.length;
-        setActiveId(sessions[nextIndex].id);
+        focusSession(sessions[nextIndex].id);
       }
     }
 
@@ -130,7 +163,7 @@ function App() {
 
   const handleNewShell = () => {
     spawnShell()
-      .then(setActiveId)
+      .then(focusSession)
       .catch(() => {
         // Nothing to surface here yet — no pane exists for a failed spawn.
       });
@@ -140,7 +173,7 @@ function App() {
     agentCounterRef.current += 1;
     const label = `Agent ${agentCounterRef.current}`;
     spawnAgent(label, cwd)
-      .then(setActiveId)
+      .then(focusSession)
       .catch(() => {
         // Same as above.
       });
@@ -151,20 +184,18 @@ function App() {
       <Sidebar
         sessions={sessions}
         activeId={activeId}
-        onSelect={setActiveId}
+        fanOutOpen={fanOutOpen}
+        onSelect={focusSession}
         onNewShell={handleNewShell}
         onNewAgent={handleNewAgent}
         onClose={close}
+        onToggleFanOut={() => setFanOutOpen((current) => !current)}
       />
-      <div className="app-layout__panes">
-        {sessions.map((session) => (
-          <TerminalView key={session.id} sessionId={session.id} visible={session.id === activeId} />
-        ))}
-      </div>
+      <PaneArea sessions={sessions} activeId={activeId} fanOutOpen={fanOutOpen} onFocus={focusSession} />
       {quickSwitcherOpen && (
         <QuickSwitcher
           sessions={sessions}
-          onSelect={setActiveId}
+          onSelect={focusSession}
           onClose={() => setQuickSwitcherOpen(false)}
         />
       )}

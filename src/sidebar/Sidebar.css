@@ -13,6 +13,9 @@
 }
 
 .sidebar__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px;
 }
 
@@ -44,6 +47,20 @@
 
 .sidebar__button:hover {
   background-color: #343a4a;
+}
+
+.sidebar__button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sidebar__button--active {
+  background-color: #3a5f8a;
+  border-color: #4b7ab0;
+}
+
+.sidebar__button--active:hover {
+  background-color: #43699a;
 }
 
 .sidebar__list {

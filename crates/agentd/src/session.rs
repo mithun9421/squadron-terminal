@@ -91,6 +91,18 @@ fn resolved_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
 }
 
+/// A sensible default working directory for a session nobody gave an
+/// explicit one. Never leave the pty's cwd unset: an unset cwd makes
+/// `portable_pty` inherit *this app's own process* working directory, which
+/// is an implementation detail (in dev builds, literally this repo's own
+/// checkout) — not something a spawned shell or agent should ever land in
+/// silently.
+fn default_session_cwd() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"))
+}
+
 /// Session-identity env vars Claude Code itself sets (`CLAUDECODE`,
 /// `CLAUDE_CODE_SESSION_ID`, the inter-agent `CLAUDE_CODE_MESSAGING_*`
 /// socket/token, ...). `portable_pty::CommandBuilder` inherits the parent
@@ -186,7 +198,8 @@ pub struct Session {
 
 impl Session {
     fn spawn_shell(rows: u16, cols: u16, label: String) -> Result<Self, SessionError> {
-        let command = isolated_command(resolved_shell());
+        let mut command = isolated_command(resolved_shell());
+        command.cwd(default_session_cwd());
         Self::spawn_with_command(rows, cols, SessionKind::Shell, label, command, None, None)
     }
 
@@ -219,9 +232,7 @@ impl Session {
             "--",
             settings_path.to_string_lossy().as_ref(),
         ]);
-        if let Some(dir) = &cwd {
-            command.cwd(dir);
-        }
+        command.cwd(cwd.unwrap_or_else(default_session_cwd));
 
         let server_for_cleanup = Arc::clone(hook_server);
         let token_for_cleanup = token.clone();
@@ -608,6 +619,27 @@ mod tests {
         let id = manager.spawn(24, 80).expect("spawn should succeed");
         let pid = manager.pid(id).expect("session should exist");
         assert!(pid.is_some(), "spawned session should report a live pid");
+    }
+
+    #[test]
+    fn shell_sessions_default_cwd_to_home_not_this_process_cwd() {
+        // Regression test: an unset pty cwd previously fell back to *this
+        // test binary's own* working directory (the repo checkout) instead
+        // of something sensible. Asserts the actual intended fallback
+        // ($HOME) is where the session lands — not merely that the old
+        // broken value is absent, which a differently-broken fallback could
+        // also satisfy.
+        let home = std::env::var("HOME").expect("HOME should be set in the test environment");
+        let manager = SessionManager::new();
+        let id = manager.spawn(24, 80).expect("spawn should succeed");
+
+        manager.write(id, b"pwd\n").expect("write should succeed");
+
+        let snapshot = wait_for_snapshot_containing(&manager, id, &home, Duration::from_secs(3));
+        assert!(
+            snapshot.iter().any(|line| line.trim() == home),
+            "spawned shell's cwd should default to $HOME ({home}), got: {snapshot:?}"
+        );
     }
 
     #[test]

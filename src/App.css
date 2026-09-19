@@ -23,7 +23,7 @@ body,
   overflow: hidden;
 }
 
-.app-layout__panes {
+.app-layout > .pane-area {
   flex: 1;
   min-width: 0;
   height: 100%;

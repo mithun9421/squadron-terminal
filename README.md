@@ -4,14 +4,15 @@ A terminal emulator purpose-built for running and supervising multiple Claude Co
 agents at once. See the [product PRD](https://claude.ai/code/artifact/07e1a0af-b097-41bd-9ce2-0a7c93407a1d)
 for the full requirements, competitive landscape, and architecture rationale.
 
-This repo currently implements **Phases 0–2** of the roadmap: a real,
+This repo currently implements **Phases 0–3** of the roadmap: a real,
 GPU-rendered terminal emulator (Tauri 2 + Rust PTY/VT core + xterm.js) with a
 sidebar for running several sessions at once — plain shells or actual Claude
 Code agents, whose live lifecycle state (idle/thinking/running a tool/needs
 input) is detected via Claude Code's own hooks and shown as an animated ASCII
 avatar per session. Switch sessions by clicking, with `Cmd/Alt+1`–`9`,
-`Cmd/Alt+]`/`[` to cycle, or `Cmd/Alt+K` for a fuzzy quick-switcher. The
-fan-out grid view is a later phase.
+`Cmd/Alt+]`/`[` to cycle, or `Cmd/Alt+K` for a fuzzy quick-switcher — or fan
+every running session out into a live grid at once with `Cmd/Alt+G`, and
+click any tile to pop it back to full focus.
 
 ## Stack
 
@@ -23,9 +24,11 @@ fan-out grid view is a later phase.
   later phase without rewriting this logic.
 - **`src-tauri`** — Tauri 2 app shell exposing `agentd` over Tauri commands/events.
 - **`src`** — React + TypeScript frontend: a `Sidebar` (with animated
-  `AsciiAvatar`s and a `QuickSwitcher`) listing every session plus one
-  `TerminalView` (`@xterm/xterm`, WebGL-accelerated) per session, kept
-  mounted-but-hidden in the background so switching never loses scrollback.
+  `AsciiAvatar`s and a `QuickSwitcher`) listing every session, and a
+  `PaneArea` rendering one `TerminalView` (`@xterm/xterm`, WebGL-accelerated)
+  per session — always mounted, never unmounted on a mode switch, just shown
+  full-size (focus mode) or tiled into a CSS grid (fan-out mode) so switching
+  or fanning out never loses scrollback.
 
 ## Setup
 
@@ -58,10 +61,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   daemon process — an app crash currently takes running sessions down with it.
   The `agentd` crate has no Tauri dependency specifically so this can be
   extracted later without a rewrite.
-- No fan-out grid yet (Phase 3).
-- Every active session's xterm.js instance stays mounted simultaneously (just
-  hidden when not focused); there's no render throttling for background panes
-  yet. Fine at a handful of sessions, revisit once fan-out drives up pane counts.
+- Every session's xterm.js instance stays mounted simultaneously (just hidden
+  when not shown); there's no render throttling for large fan-out grids yet —
+  every tile is a full live WebGL-rendered terminal. Fine at a handful of
+  sessions; the PRD's own architecture doc calls throttling beyond ~9 panes a
+  later optimization, not required for this phase.
+- Fan-out tiles are view-only by design (click a tile to pop it to full focus
+  and interact) — `inert` while fanned out keeps a backgrounded tile's
+  terminal out of the keyboard tab order, so Tab-ing through the grid can't
+  land you typing into the wrong session's PTY.
 - A hook event that fires in the brief window between a new agent session's
   process starting and its id being registered in `SessionManager` is silently
   dropped — self-healing (the next hook event applies normally), so this is
