@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use tattoy_wezterm_term::color::ColorPalette;
 use tattoy_wezterm_term::{Terminal, TerminalConfiguration, TerminalSize};
 use tokio::sync::broadcast;
+
+use crate::hooks::{self, AgentState, HookServer};
 
 pub type SessionId = u64;
 
@@ -19,6 +23,28 @@ pub enum SessionError {
     Pty(String),
     #[error("session {0} not found")]
     NotFound(SessionId),
+    #[error("agent sessions are unavailable: the local hook server failed to start")]
+    HookServerUnavailable,
+}
+
+/// Whether a session is a plain shell or a Claude Code agent (hook-instrumented).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionKind {
+    Shell,
+    Agent,
+}
+
+/// A lightweight, frontend-facing view of one session — everything the
+/// sidebar needs, without exposing the session's PTY/terminal internals.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: SessionId,
+    pub label: String,
+    pub kind: SessionKind,
+    pub agent_state: Option<AgentState>,
+    pub finished: bool,
 }
 
 #[derive(Debug)]
@@ -61,7 +87,54 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// A single running shell session: a PTY-backed child process plus the headless
+fn resolved_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
+/// Writes a `--settings`-scoped Claude Code config wiring every hook we care
+/// about to this app's local hook server, keyed by `token`. Never touches the
+/// user's own global or project settings.
+fn write_hook_settings(token: &str, hook_port: u16) -> Result<PathBuf, SessionError> {
+    let dir = std::env::temp_dir().join("squadron-terminal");
+    std::fs::create_dir_all(&dir).map_err(pty_err)?;
+    // The hook token is not a cryptographic secret (the trust boundary is
+    // "loopback + same OS user"), but that boundary is only real if other
+    // local users can't just read the token off disk — a shared /tmp is
+    // common enough on Linux that this must be enforced, not incidental.
+    #[cfg(unix)]
+    restrict_to_owner(&dir, 0o700)?;
+
+    let path = dir.join(format!("hooks-{token}.json"));
+
+    let url = format!("http://127.0.0.1:{hook_port}/hook/{token}");
+    let hook_action =
+        serde_json::json!([{ "hooks": [{ "type": "http", "url": url, "timeout": 5 }] }]);
+    let settings = serde_json::json!({
+        "hooks": {
+            "SessionStart": hook_action,
+            "UserPromptSubmit": hook_action,
+            "PreToolUse": hook_action,
+            "PostToolUse": hook_action,
+            "PostToolUseFailure": hook_action,
+            "Notification": hook_action,
+            "Stop": hook_action,
+        }
+    });
+
+    let bytes = serde_json::to_vec_pretty(&settings).map_err(pty_err)?;
+    std::fs::write(&path, bytes).map_err(pty_err)?;
+    #[cfg(unix)]
+    restrict_to_owner(&path, 0o600)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn restrict_to_owner(path: &std::path::Path, mode: u32) -> Result<(), SessionError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(pty_err)
+}
+
+/// A single running session: a PTY-backed child process plus the headless
 /// virtual-terminal state that tracks what is currently on screen, independent
 /// of whether any UI is watching it.
 pub struct Session {
@@ -71,10 +144,88 @@ pub struct Session {
     output_tx: broadcast::Sender<Vec<u8>>,
     finished: Arc<AtomicBool>,
     child: Option<Box<dyn Child + Send + Sync>>,
+    kind: SessionKind,
+    label: String,
+    agent_state: Mutex<Option<AgentState>>,
+    settings_path: Option<PathBuf>,
+    hook_cleanup: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Session {
-    fn spawn(rows: u16, cols: u16) -> Result<Self, SessionError> {
+    fn spawn_shell(rows: u16, cols: u16, label: String) -> Result<Self, SessionError> {
+        let command = CommandBuilder::new(resolved_shell());
+        Self::spawn_with_command(rows, cols, SessionKind::Shell, label, command, None, None)
+    }
+
+    fn spawn_agent(
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+        label: String,
+        cwd: Option<PathBuf>,
+        hook_server: &Arc<HookServer>,
+    ) -> Result<Self, SessionError> {
+        let token = hooks::generate_token(id);
+        let settings_path = write_hook_settings(&token, hook_server.port())?;
+        // Known, accepted race: the token is routable, and the child (spawned
+        // below) can in principle fire its SessionStart hook, before `id` is
+        // inserted into SessionManager's map — `HookServer`'s callback would
+        // silently drop that one event. Self-healing (the very next hook
+        // event for this session applies normally) and not worth a two-phase
+        // spawn/insert to close for a single possibly-missed Idle transition.
+        hook_server.register(token.clone(), id);
+
+        let mut command = CommandBuilder::new(resolved_shell());
+        // The settings path is passed as a positional argument (`$1`), not
+        // interpolated into the command string, so nothing about its content
+        // (even an unlikely quote/space in a user's TMPDIR) can change what
+        // gets executed. `--` is the conventional placeholder for `$0`.
+        command.args([
+            "-lc",
+            "exec claude --settings \"$1\"",
+            "--",
+            settings_path.to_string_lossy().as_ref(),
+        ]);
+        if let Some(dir) = &cwd {
+            command.cwd(dir);
+        }
+
+        let server_for_cleanup = Arc::clone(hook_server);
+        let token_for_cleanup = token.clone();
+        let hook_cleanup: Box<dyn FnOnce() + Send> =
+            Box::new(move || server_for_cleanup.unregister(&token_for_cleanup));
+
+        let result = Self::spawn_with_command(
+            rows,
+            cols,
+            SessionKind::Agent,
+            label,
+            command,
+            Some(settings_path.clone()),
+            Some(hook_cleanup),
+        );
+
+        // `spawn_with_command` failing means no `Session` was ever
+        // constructed, so its `Drop` impl (which would otherwise unregister
+        // the token and delete the settings file) never runs — do it here
+        // instead, or both leak for the life of the app.
+        if result.is_err() {
+            hook_server.unregister(&token);
+            let _ = std::fs::remove_file(&settings_path);
+        }
+
+        result
+    }
+
+    fn spawn_with_command(
+        rows: u16,
+        cols: u16,
+        kind: SessionKind,
+        label: String,
+        command: CommandBuilder,
+        settings_path: Option<PathBuf>,
+        hook_cleanup: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Self, SessionError> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -85,11 +236,7 @@ impl Session {
             })
             .map_err(pty_err)?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let child = pair
-            .slave
-            .spawn_command(CommandBuilder::new(shell))
-            .map_err(pty_err)?;
+        let child = pair.slave.spawn_command(command).map_err(pty_err)?;
 
         let raw_writer = pair.master.take_writer().map_err(pty_err)?;
         let writer = SharedWriter(Arc::new(Mutex::new(raw_writer)));
@@ -129,9 +276,10 @@ impl Session {
                     Err(_) => break,
                 }
             }
-            // Marks the session eligible for pruning once the shell exits on its
-            // own (as opposed to an explicit close) — see SessionManager::spawn's
-            // caller-side reaper, which is what actually removes it from the map.
+            // Marks the session eligible for pruning once the process exits on
+            // its own (as opposed to an explicit close) — see
+            // SessionManager::spawn's caller-side reaper, which is what
+            // actually removes it from the map.
             reader_finished.store(true, Ordering::SeqCst);
         });
 
@@ -142,6 +290,11 @@ impl Session {
             output_tx,
             finished,
             child: Some(child),
+            kind,
+            label,
+            agent_state: Mutex::new(None),
+            settings_path,
+            hook_cleanup,
         })
     }
 
@@ -151,6 +304,24 @@ impl Session {
 
     pub fn is_finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
+    }
+
+    pub fn agent_state(&self) -> Option<AgentState> {
+        *lock(&self.agent_state)
+    }
+
+    pub fn set_agent_state(&self, state: AgentState) {
+        *lock(&self.agent_state) = Some(state);
+    }
+
+    pub fn summary(&self, id: SessionId) -> SessionSummary {
+        SessionSummary {
+            id,
+            label: self.label.clone(),
+            kind: self.kind,
+            agent_state: self.agent_state(),
+            finished: self.is_finished(),
+        }
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<(), SessionError> {
@@ -198,6 +369,12 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some(cleanup) = self.hook_cleanup.take() {
+            cleanup();
+        }
+        if let Some(path) = &self.settings_path {
+            let _ = std::fs::remove_file(path);
+        }
         // Closing a session must never leave a zombie or orphaned process
         // behind, and must never leave one running just because it ignored
         // the pty hangup. `kill` is best-effort (the child may already have
@@ -212,28 +389,73 @@ impl Drop for Session {
     }
 }
 
-/// Owns every running session for the app. Deliberately free of any Tauri
-/// dependency: this is the seam where a standalone `agentd` daemon process
-/// (per the PRD's architecture) takes over in a later phase, without rewriting
-/// the session/PTY/VT logic itself.
+/// Owns every running session for the app, plus the local hook server every
+/// Claude Code agent session's `--settings` file points at. Deliberately free
+/// of any Tauri dependency: this is the seam where a standalone `agentd`
+/// daemon process (per the PRD's architecture) takes over in a later phase,
+/// without rewriting the session/PTY/VT/hook logic itself.
 ///
 /// Sessions are held behind `Arc` so the map lock only ever guards a hashmap
 /// lookup + refcount bump, never a session's own I/O (a slow or blocked PTY
 /// write on one session must not stall every other session in the app).
-#[derive(Default)]
 pub struct SessionManager {
-    sessions: Mutex<HashMap<SessionId, Arc<Mutex<Session>>>>,
+    sessions: Arc<Mutex<HashMap<SessionId, Arc<Mutex<Session>>>>>,
     next_id: AtomicU64,
+    // `None` if the loopback bind failed at startup (sandboxed environment,
+    // restrictive local security software, ...) — plain shells still work
+    // either way; only agent sessions need this.
+    hook_server: Option<Arc<HookServer>>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionManager {
     pub fn new() -> Self {
-        Self::default()
+        let sessions: Arc<Mutex<HashMap<SessionId, Arc<Mutex<Session>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // The hook server's callback needs to reach the same map `spawn`
+        // inserts into, so it holds its own clone of the same `Arc` rather
+        // than a copy of the map.
+        let state_sessions = Arc::clone(&sessions);
+        let hook_server = HookServer::start(move |id, state| {
+            if let Some(session) = lock(&state_sessions).get(&id) {
+                lock(session).set_agent_state(state);
+            }
+        })
+        .map(Arc::new);
+
+        Self {
+            sessions,
+            next_id: AtomicU64::new(0),
+            hook_server,
+        }
     }
 
     pub fn spawn(&self, rows: u16, cols: u16) -> Result<SessionId, SessionError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let session = Session::spawn(rows, cols)?;
+        let label = format!("Shell {id}");
+        let session = Session::spawn_shell(rows, cols, label)?;
+        lock(&self.sessions).insert(id, Arc::new(Mutex::new(session)));
+        Ok(id)
+    }
+
+    pub fn spawn_agent(
+        &self,
+        rows: u16,
+        cols: u16,
+        label: String,
+        cwd: Option<PathBuf>,
+    ) -> Result<SessionId, SessionError> {
+        let hook_server = self
+            .hook_server
+            .as_ref()
+            .ok_or(SessionError::HookServerUnavailable)?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let session = Session::spawn_agent(id, rows, cols, label, cwd, hook_server)?;
         lock(&self.sessions).insert(id, Arc::new(Mutex::new(session)));
         Ok(id)
     }
@@ -280,7 +502,18 @@ impl SessionManager {
         Ok(receiver)
     }
 
-    /// Removes and drops the session, killing and reaping its child process.
+    /// A snapshot of every session's frontend-facing summary, in no
+    /// particular order — the sidebar sorts/renders as it sees fit.
+    pub fn list(&self) -> Vec<SessionSummary> {
+        lock(&self.sessions)
+            .iter()
+            .map(|(&id, session)| lock(session).summary(id))
+            .collect()
+    }
+
+    /// Removes and drops the session, killing and reaping its child process
+    /// (and, for an agent session, unregistering its hook token and deleting
+    /// its temporary `--settings` file).
     pub fn close(&self, id: SessionId) -> Result<(), SessionError> {
         lock(&self.sessions)
             .remove(&id)
@@ -396,5 +629,50 @@ mod tests {
             became_finished,
             "session should mark itself finished after the shell exits"
         );
+    }
+
+    #[test]
+    fn list_reports_shell_sessions_with_no_agent_state() {
+        let manager = SessionManager::new();
+        let id = manager.spawn(24, 80).expect("spawn should succeed");
+
+        let summaries = manager.list();
+        let summary = summaries
+            .iter()
+            .find(|s| s.id == id)
+            .expect("session should be listed");
+        assert_eq!(summary.kind, SessionKind::Shell);
+        assert_eq!(summary.agent_state, None);
+        assert!(!summary.finished);
+    }
+
+    #[test]
+    fn spawn_agent_writes_a_settings_file_pointing_at_the_hook_server() {
+        let manager = SessionManager::new();
+        // A fake, guaranteed-not-to-exist "claude" won't matter: we're only
+        // checking the settings file this call generates before spawning,
+        // not the child process's behavior. A real shell always exists.
+        let id = manager
+            .spawn_agent(24, 80, "Test Agent".to_string(), None)
+            .expect("spawn_agent should succeed even if `claude` itself isn't installed here");
+
+        let summaries = manager.list();
+        let summary = summaries
+            .iter()
+            .find(|s| s.id == id)
+            .expect("session should be listed");
+        assert_eq!(summary.kind, SessionKind::Agent);
+        assert_eq!(summary.label, "Test Agent");
+
+        let dir = std::env::temp_dir().join("squadron-terminal");
+        let has_settings_file = std::fs::read_dir(&dir)
+            .map(|entries| entries.filter_map(Result::ok).count() > 0)
+            .unwrap_or(false);
+        assert!(
+            has_settings_file,
+            "expected at least one generated hooks-*.json settings file"
+        );
+
+        manager.close(id).expect("close should succeed");
     }
 }

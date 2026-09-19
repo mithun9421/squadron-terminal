@@ -1,17 +1,18 @@
-.terminal-pane {
+.terminal-view {
   position: relative;
-  width: 100vw;
-  height: 100vh;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
   background-color: #111318;
 }
 
-.terminal-pane__surface {
+.terminal-view__surface {
   width: 100%;
   height: 100%;
   padding: 8px;
 }
 
-.terminal-pane__error {
+.terminal-view__error {
   position: absolute;
   bottom: 8px;
   left: 8px;

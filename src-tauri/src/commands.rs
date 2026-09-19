@@ -1,11 +1,12 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
-use agentd::{SessionId, SessionManager};
+use agentd::{SessionId, SessionManager, SessionSummary};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
 
-/// How often the output-forwarding task checks whether a session's shell has
+/// How often the output-forwarding task checks whether a session's process has
 /// exited on its own, so the session can be pruned (and its process reaped)
 /// without the frontend ever having to call `close_session`.
 const FINISHED_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -17,16 +18,15 @@ struct SessionOutputPayload {
     data: Vec<u8>,
 }
 
-#[tauri::command]
-pub fn spawn_session(
-    state: State<'_, SessionManager>,
+/// Spawns the background task that forwards one session's raw output bytes to
+/// the frontend as `session-output` events, and prunes the session once its
+/// process exits on its own. Shared by every "spawn a session" command,
+/// regardless of session kind.
+fn start_output_forwarding(
     app: AppHandle,
-    rows: u16,
-    cols: u16,
-) -> Result<SessionId, String> {
-    let id = state.spawn(rows, cols).map_err(|e| e.to_string())?;
-    let mut output_rx = state.subscribe(id).map_err(|e| e.to_string())?;
-
+    id: SessionId,
+    mut output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
@@ -50,8 +50,41 @@ pub fn spawn_session(
             }
         }
     });
+}
 
+#[tauri::command]
+pub fn spawn_shell_session(
+    state: State<'_, SessionManager>,
+    app: AppHandle,
+    rows: u16,
+    cols: u16,
+) -> Result<SessionId, String> {
+    let id = state.spawn(rows, cols).map_err(|e| e.to_string())?;
+    let output_rx = state.subscribe(id).map_err(|e| e.to_string())?;
+    start_output_forwarding(app, id, output_rx);
     Ok(id)
+}
+
+#[tauri::command]
+pub fn spawn_agent_session(
+    state: State<'_, SessionManager>,
+    app: AppHandle,
+    rows: u16,
+    cols: u16,
+    label: String,
+    cwd: Option<String>,
+) -> Result<SessionId, String> {
+    let id = state
+        .spawn_agent(rows, cols, label, cwd.map(PathBuf::from))
+        .map_err(|e| e.to_string())?;
+    let output_rx = state.subscribe(id).map_err(|e| e.to_string())?;
+    start_output_forwarding(app, id, output_rx);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn list_sessions(state: State<'_, SessionManager>) -> Vec<SessionSummary> {
+    state.list()
 }
 
 #[tauri::command]
