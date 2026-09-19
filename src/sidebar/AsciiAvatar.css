@@ -1,0 +1,39 @@
+.ascii-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 5ch;
+  flex-shrink: 0;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: -0.5px;
+  white-space: pre;
+}
+
+.ascii-avatar--shell {
+  color: #6b7280;
+}
+
+.ascii-avatar--starting {
+  color: #6b7280;
+}
+
+.ascii-avatar--idle {
+  color: #4b9cff;
+}
+
+.ascii-avatar--thinking {
+  color: #f5c542;
+}
+
+.ascii-avatar--runningTool {
+  color: #f59e42;
+}
+
+.ascii-avatar--needsInput {
+  color: #ef4444;
+}
+
+.ascii-avatar--finished {
+  color: #3a3f4e;
+}

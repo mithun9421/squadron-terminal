@@ -4,13 +4,14 @@ A terminal emulator purpose-built for running and supervising multiple Claude Co
 agents at once. See the [product PRD](https://claude.ai/code/artifact/07e1a0af-b097-41bd-9ce2-0a7c93407a1d)
 for the full requirements, competitive landscape, and architecture rationale.
 
-This repo currently implements **Phase 0 and Phase 1** of the roadmap: a real,
+This repo currently implements **Phases 0–2** of the roadmap: a real,
 GPU-rendered terminal emulator (Tauri 2 + Rust PTY/VT core + xterm.js) with a
 sidebar for running several sessions at once — plain shells or actual Claude
 Code agents, whose live lifecycle state (idle/thinking/running a tool/needs
-input) is detected via Claude Code's own hooks. ASCII-art avatars and the
-fan-out grid view are later phases (the sidebar today shows a plain colored
-status dot per session, not an avatar).
+input) is detected via Claude Code's own hooks and shown as an animated ASCII
+avatar per session. Switch sessions by clicking, with `Cmd/Alt+1`–`9`,
+`Cmd/Alt+]`/`[` to cycle, or `Cmd/Alt+K` for a fuzzy quick-switcher. The
+fan-out grid view is a later phase.
 
 ## Stack
 
@@ -21,8 +22,9 @@ status dot per session, not an avatar).
   Designed to be extracted into a standalone daemon process (per the PRD) in a
   later phase without rewriting this logic.
 - **`src-tauri`** — Tauri 2 app shell exposing `agentd` over Tauri commands/events.
-- **`src`** — React + TypeScript frontend: a `Sidebar` listing every session plus
-  one `TerminalView` (`@xterm/xterm`, WebGL-accelerated) per session, kept
+- **`src`** — React + TypeScript frontend: a `Sidebar` (with animated
+  `AsciiAvatar`s and a `QuickSwitcher`) listing every session plus one
+  `TerminalView` (`@xterm/xterm`, WebGL-accelerated) per session, kept
   mounted-but-hidden in the background so switching never loses scrollback.
 
 ## Setup
@@ -56,8 +58,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   daemon process — an app crash currently takes running sessions down with it.
   The `agentd` crate has no Tauri dependency specifically so this can be
   extracted later without a rewrite.
-- No ASCII-art avatars or fan-out grid yet (Phases 2–3) — the sidebar shows a
-  plain status dot per session.
+- No fan-out grid yet (Phase 3).
 - Every active session's xterm.js instance stays mounted simultaneously (just
   hidden when not focused); there's no render throttling for background panes
   yet. Fine at a handful of sessions, revisit once fan-out drives up pane counts.
@@ -65,4 +66,11 @@ cargo clippy --workspace --all-targets -- -D warnings
   process starting and its id being registered in `SessionManager` is silently
   dropped — self-healing (the next hook event applies normally), so this is
   accepted rather than closed with a two-phase spawn.
+- Every spawned session (shell or agent) has Claude Code's own session-identity
+  env vars (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, the inter-agent messaging
+  socket/token, ...) scrubbed before launch — otherwise, if this app's own
+  process is ever launched from inside a Claude Code session (a dev terminal,
+  an editor's integrated terminal, ...), a spawned agent (or anything run
+  inside a spawned shell) would silently inherit that identity and attach to
+  the *outer* session instead of starting independent.
 - macOS/Linux only for now; Windows (ConPTY) is a later phase.

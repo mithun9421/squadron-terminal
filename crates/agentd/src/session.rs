@@ -91,6 +91,39 @@ fn resolved_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
 }
 
+/// Session-identity env vars Claude Code itself sets (`CLAUDECODE`,
+/// `CLAUDE_CODE_SESSION_ID`, the inter-agent `CLAUDE_CODE_MESSAGING_*`
+/// socket/token, ...). `portable_pty::CommandBuilder` inherits the parent
+/// process's full environment by default, and this app's own process may
+/// itself have been launched from inside a Claude Code session (a dev
+/// terminal, an editor's integrated terminal, ...) — without scrubbing these,
+/// a spawned session (and anything run inside it, including a manually-typed
+/// `claude`) would silently inherit them and attach to *that* session's
+/// identity/messaging channel instead of starting genuinely independent.
+const SESSION_IDENTITY_ENV_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+];
+
+/// A `CommandBuilder` for `program` with every session-identity env var
+/// removed, so every session this app spawns — shell or agent — starts as an
+/// independent process regardless of what launched this app itself.
+fn isolated_command(program: impl AsRef<std::ffi::OsStr>) -> CommandBuilder {
+    let mut command = CommandBuilder::new(program);
+    for var in SESSION_IDENTITY_ENV_VARS {
+        command.env_remove(var);
+    }
+    command
+}
+
 /// Writes a `--settings`-scoped Claude Code config wiring every hook we care
 /// about to this app's local hook server, keyed by `token`. Never touches the
 /// user's own global or project settings.
@@ -153,7 +186,7 @@ pub struct Session {
 
 impl Session {
     fn spawn_shell(rows: u16, cols: u16, label: String) -> Result<Self, SessionError> {
-        let command = CommandBuilder::new(resolved_shell());
+        let command = isolated_command(resolved_shell());
         Self::spawn_with_command(rows, cols, SessionKind::Shell, label, command, None, None)
     }
 
@@ -175,7 +208,7 @@ impl Session {
         // spawn/insert to close for a single possibly-missed Idle transition.
         hook_server.register(token.clone(), id);
 
-        let mut command = CommandBuilder::new(resolved_shell());
+        let mut command = isolated_command(resolved_shell());
         // The settings path is passed as a positional argument (`$1`), not
         // interpolated into the command string, so nothing about its content
         // (even an unlikely quote/space in a user's TMPDIR) can change what
@@ -575,6 +608,41 @@ mod tests {
         let id = manager.spawn(24, 80).expect("spawn should succeed");
         let pid = manager.pid(id).expect("session should exist");
         assert!(pid.is_some(), "spawned session should report a live pid");
+    }
+
+    #[test]
+    fn spawned_shells_do_not_inherit_claude_session_identity_env_vars() {
+        // This app's own process may itself have been launched from inside a
+        // Claude Code session (a dev terminal, an editor's integrated
+        // terminal, ...) — spawned sessions must never inherit that
+        // session's identity, or anything run inside them (including a
+        // manually-typed `claude`) would silently attach to it. The var name
+        // is unique to this test, so mutating process env here can't
+        // cross-contaminate other tests running in parallel.
+        // SAFETY: single-threaded with respect to this variable — nothing
+        // else in this crate's test suite reads or writes it.
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session-should-not-leak");
+        }
+
+        let manager = SessionManager::new();
+        let id = manager.spawn(24, 80).expect("spawn should succeed");
+        manager
+            .write(id, b"echo \"marker=[$CLAUDE_CODE_SESSION_ID]\"\n")
+            .expect("write should succeed");
+
+        let snapshot =
+            wait_for_snapshot_containing(&manager, id, "marker=[]", Duration::from_secs(3));
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        }
+
+        assert!(
+            snapshot.iter().any(|line| line.contains("marker=[]")),
+            "CLAUDE_CODE_SESSION_ID should be unset in the spawned session, got: {snapshot:?}"
+        );
     }
 
     #[test]

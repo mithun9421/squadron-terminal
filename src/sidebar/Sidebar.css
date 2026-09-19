@@ -102,38 +102,3 @@
 .session-row__close:hover {
   color: #d7dae0;
 }
-
-.session-row__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.session-row__dot--shell {
-  background-color: #6b7280;
-}
-
-.session-row__dot--starting {
-  background-color: #6b7280;
-}
-
-.session-row__dot--idle {
-  background-color: #4b9cff;
-}
-
-.session-row__dot--thinking {
-  background-color: #f5c542;
-}
-
-.session-row__dot--running {
-  background-color: #f59e42;
-}
-
-.session-row__dot--needs-input {
-  background-color: #ef4444;
-}
-
-.session-row__dot--finished {
-  background-color: #3a3f4e;
-}

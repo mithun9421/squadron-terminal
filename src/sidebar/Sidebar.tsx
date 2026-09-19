@@ -1,5 +1,8 @@
 import { useState } from "react";
 import type { SessionSummary } from "../sessions/types";
+import { AsciiAvatar } from "./AsciiAvatar";
+import { useAnimationFrame } from "./useAnimationFrame";
+import { visualStateLabel, visualStateOf } from "./sessionVisual";
 import "./Sidebar.css";
 
 interface SidebarProps {
@@ -11,40 +14,11 @@ interface SidebarProps {
   onClose: (id: number) => void;
 }
 
-function stateLabel(session: SessionSummary): string {
-  if (session.finished) {
-    return "finished";
-  }
-  if (session.kind === "shell") {
-    return "shell";
-  }
-  return session.agentState ?? "starting";
-}
-
-function dotClassName(session: SessionSummary): string {
-  if (session.finished) {
-    return "session-row__dot--finished";
-  }
-  if (session.kind === "shell") {
-    return "session-row__dot--shell";
-  }
-  switch (session.agentState) {
-    case null:
-      // No hook has fired yet (matches the "starting" text in stateLabel).
-      return "session-row__dot--starting";
-    case "thinking":
-      return "session-row__dot--thinking";
-    case "runningTool":
-      return "session-row__dot--running";
-    case "needsInput":
-      return "session-row__dot--needs-input";
-    case "idle":
-      return "session-row__dot--idle";
-  }
-}
+const AVATAR_FRAME_INTERVAL_MS = 400;
 
 export function Sidebar({ sessions, activeId, onSelect, onNewShell, onNewAgent, onClose }: SidebarProps) {
   const [cwdDraft, setCwdDraft] = useState("");
+  const tick = useAnimationFrame(AVATAR_FRAME_INTERVAL_MS);
 
   return (
     <aside className="sidebar">
@@ -83,9 +57,9 @@ export function Sidebar({ sessions, activeId, onSelect, onNewShell, onNewAgent, 
               className="session-row__select"
               onClick={() => onSelect(session.id)}
             >
-              <span className={`session-row__dot ${dotClassName(session)}`} />
+              <AsciiAvatar session={session} tick={tick} />
               <span className="session-row__label">{session.label}</span>
-              <span className="session-row__state">{stateLabel(session)}</span>
+              <span className="session-row__state">{visualStateLabel(visualStateOf(session))}</span>
             </button>
             <button
               type="button"
