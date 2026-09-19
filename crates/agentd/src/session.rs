@@ -226,9 +226,20 @@ impl Session {
         // interpolated into the command string, so nothing about its content
         // (even an unlikely quote/space in a user's TMPDIR) can change what
         // gets executed. `--` is the conventional placeholder for `$0`.
+        //
+        // `--setting-sources project,local` deliberately excludes the `user`
+        // scope (`~/.claude/settings.json`) — otherwise an agent inherits
+        // whatever the person has configured globally on this machine
+        // (a cross-session memory tool's SessionStart hook, personal
+        // plugins, a global model override, ...), which makes a freshly
+        // spawned agent look like it "already knows" things unrelated to
+        // its own task. This is intentionally about isolation, not security:
+        // our own hook wiring still applies regardless, since `--settings
+        // <file>` is a separate, explicit override, not one of the three
+        // scoped sources this flag controls.
         command.args([
             "-lc",
-            "exec claude --settings \"$1\"",
+            "exec claude --setting-sources project,local --settings \"$1\"",
             "--",
             settings_path.to_string_lossy().as_ref(),
         ]);
