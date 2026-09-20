@@ -14,6 +14,13 @@ avatar per session. Switch sessions by clicking, with `Cmd/Alt+1`–`9`,
 every running session out into a live grid at once with `Cmd/Alt+G`, and
 click any tile to pop it back to full focus.
 
+## Demo
+
+See the experience — features, screenshots, and what it's like to run —
+at **[mithun9421.github.io/squadron-terminal](https://mithun9421.github.io/squadron-terminal/)**.
+This is a static site (`website/`), separate from the app below; it doesn't
+launch or require the terminal itself.
+
 ## Download
 
 Prebuilt macOS and Windows installers are published on the
